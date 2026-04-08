@@ -7,6 +7,12 @@ const EMAIL_SENHA = process.env.EMAIL_SENHA;
 const ARQUIVO_ESTADO = 'estado.json';
 const API_BASE = 'https://sapl3.al.pb.leg.br/api';
 
+// A API da ALPB ignora o parâmetro ordering e sempre retorna em ordem
+// crescente de ID (menor para maior). Ou seja, as proposições mais recentes
+// estão sempre nas ÚLTIMAS páginas, não na primeira.
+// Estratégia: descobrir o total de páginas e buscar as 2 últimas
+// (200 proposições), o que cobre qualquer volume entre execuções.
+
 function carregarEstado() {
   if (fs.existsSync(ARQUIVO_ESTADO)) {
     return JSON.parse(fs.readFileSync(ARQUIVO_ESTADO, 'utf8'));
@@ -19,7 +25,6 @@ function salvarEstado(estado) {
 }
 
 function extrairTipo(str) {
-  // __str__ vem como "Projeto de Lei nº 123 de 2026" — pega tudo antes do "nº"
   if (!str) return 'OUTROS';
   const match = str.match(/^(.+?)\s+n[oº°]/i);
   return match ? match[1].trim().toUpperCase() : str.split(' ').slice(0, 3).join(' ').toUpperCase();
@@ -31,7 +36,6 @@ async function enviarEmail(novas) {
     auth: { user: EMAIL_REMETENTE, pass: EMAIL_SENHA },
   });
 
-  // Agrupa por tipo
   const porTipo = {};
   novas.forEach(p => {
     if (!porTipo[p.tipo]) porTipo[p.tipo] = [];
@@ -85,16 +89,12 @@ async function enviarEmail(novas) {
 }
 
 async function buscarPagina(ano, page) {
-  const url = `${API_BASE}/materia/materialegislativa/?ano=${ano}&page=${page}&page_size=100&ordering=-id`;
+  const url = `${API_BASE}/materia/materialegislativa/?ano=${ano}&page=${page}&page_size=100`;
   const response = await fetch(url);
-
   if (!response.ok) {
-    console.error(`❌ Erro na API: ${response.status} ${response.statusText}`);
-    const texto = await response.text();
-    console.error('Resposta:', texto.substring(0, 300));
+    console.error(`❌ Erro na API (página ${page}): ${response.status}`);
     return null;
   }
-
   return await response.json();
 }
 
@@ -102,31 +102,42 @@ async function buscarProposicoes() {
   const ano = new Date().getFullYear();
   console.log(`🔍 Buscando proposições de ${ano}...`);
 
-  const primeira = await buscarPagina(ano, 1);
-  if (!primeira) return [];
+  // Passo 1: descobrir total de páginas com uma chamada rápida
+  const sonda = await buscarPagina(ano, 1);
+  if (!sonda) return [];
 
-  const total = primeira.pagination?.total_entries || 0;
-  const totalPaginas = primeira.pagination?.total_pages || 1;
+  const total = sonda.pagination?.total_entries || 0;
+  const totalPaginas = sonda.pagination?.total_pages || 1;
   console.log(`📊 Total na API: ${total} proposições em ${totalPaginas} páginas`);
 
-  // Primeira execução: pega só as 100 mais recentes (1 página com ordering=-id)
-  // Execuções seguintes: idem — o estado.json já tem os ids antigos
-  return primeira.results || [];
+  // Passo 2: buscar as 2 últimas páginas (onde estão os IDs mais altos)
+  // Isso cobre até 200 proposições novas entre execuções — mais que suficiente
+  const paginasParaBuscar = [];
+  if (totalPaginas >= 2) paginasParaBuscar.push(totalPaginas - 1);
+  paginasParaBuscar.push(totalPaginas);
+
+  const resultados = [];
+  for (const pagina of paginasParaBuscar) {
+    console.log(`📄 Buscando página ${pagina} de ${totalPaginas}...`);
+    const dados = await buscarPagina(ano, pagina);
+    if (dados?.results) {
+      resultados.push(...dados.results);
+    }
+  }
+
+  console.log(`📦 Proposições carregadas: ${resultados.length}`);
+  return resultados;
 }
 
 function normalizarProposicao(p) {
   const tipo = extrairTipo(p.__str__);
 
-  // autores é array de ids numéricos nesta API — nome não vem inline
-  // Se vier como array de objetos no futuro, ajustar aqui
   let autor = '-';
   if (Array.isArray(p.autores) && p.autores.length > 0) {
-    // Tenta extrair nome se vier como objeto
     const primeiro = p.autores[0];
     if (typeof primeiro === 'object' && primeiro.nome) {
       autor = p.autores.map(a => a.nome).join(', ');
     }
-    // Se vier como número (id), deixa '-' mesmo
   }
 
   return {
