@@ -264,13 +264,20 @@ function normalizarProposicao(p) {
       const aReq = a.tipo.startsWith('REQUERIMENTO');
       const bReq = b.tipo.startsWith('REQUERIMENTO');
 
+      // Requerimentos sempre no fim
       if (aReq !== bReq) return aReq ? 1 : -1;
-      if (aIdx !== -1 && bIdx !== -1) return aIdx - bIdx;
+      // Tipos principais: ordem regimental
+      if (aIdx !== -1 && bIdx !== -1) {
+        if (aIdx !== bIdx) return aIdx - bIdx;
+        // Mesmo tipo: número decrescente (mais recente primeiro)
+        return Number(b.numero) - Number(a.numero);
+      }
       if (aIdx !== -1) return -1;
       if (bIdx !== -1) return 1;
+      // Outros: alfabético, depois número decrescente
       if (a.tipo < b.tipo) return -1;
       if (a.tipo > b.tipo) return 1;
-      return (parseInt(b.numero) || 0) - (parseInt(a.numero) || 0);
+      return Number(b.numero) - Number(a.numero);
     });
 
     await enviarEmail(novas);
