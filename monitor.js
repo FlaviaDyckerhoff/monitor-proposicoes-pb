@@ -1,4 +1,5 @@
 const fs = require('fs');
+const { execFile } = require('child_process');
 
 const EMAIL_DESTINO = process.env.EMAIL_DESTINO;
 const EMAIL_REMETENTE = process.env.EMAIL_REMETENTE;
@@ -11,8 +12,22 @@ const CONTROLE03_API_USER = process.env.CONTROLE03_API_USER || '';
 const CONTROLE03_API_PASS = process.env.CONTROLE03_API_PASS || '';
 const CONTROLE03_BASIC_AUTH = process.env.CONTROLE03_BASIC_AUTH || '';
 
-const API_BASE = 'https://sapl.al.pb.leg.br/api';
-const SITE_BASE = 'https://sapl.al.pb.leg.br';
+const API_SOURCES = [
+  {
+    label: 'sapl3',
+    apiBase: 'https://sapl3.al.pb.leg.br/api',
+    siteBase: 'https://sapl3.al.pb.leg.br',
+    insecureTls: true,
+  },
+  {
+    label: 'sapl',
+    apiBase: 'https://sapl.al.pb.leg.br/api',
+    siteBase: 'https://sapl.al.pb.leg.br',
+    insecureTls: false,
+  },
+];
+const API_BASE = API_SOURCES[0].apiBase;
+const SITE_BASE = API_SOURCES[0].siteBase;
 
 const ABRASEL_PB_TERMOS = [
   'Abrasel', 'Abrasel PB', 'Abrasel Paraíba',
@@ -579,7 +594,7 @@ async function enviarEmail(novas) {
         <tbody>${linhas}</tbody>
       </table>
       <p style="margin-top:20px;font-size:12px;color:#999">
-        Acesse: <a href="https://sapl.al.pb.leg.br/materia/pesquisar-materia">sapl.al.pb.leg.br</a>
+        Acesse: <a href="https://sapl3.al.pb.leg.br/materia/pesquisar-materia">sapl3.al.pb.leg.br</a>
       </p>
     </div>
   `;
@@ -594,15 +609,59 @@ async function enviarEmail(novas) {
   console.log(`✅ Email enviado com ${novas.length} proposições novas.`);
 }
 
-async function buscarPagina(ano, page, tipoId = null) {
-  let url = `${API_BASE}/materia/materialegislativa/?ano=${ano}&page=${page}&page_size=100`;
-  if (tipoId) url += `&tipo=${tipoId}`;
-  const response = await fetch(url);
-  if (!response.ok) {
-    console.error(`❌ Erro na API (página ${page}${tipoId ? `, tipo ${tipoId}` : ''}): ${response.status}`);
-    return null;
-  }
+async function fetchJson(url) {
+  const response = await fetch(url, { signal: AbortSignal.timeout(25000) });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return await response.json();
+}
+
+function fetchJsonInsecure(url) {
+  return new Promise((resolve, reject) => {
+    execFile('curl', [
+      '-k',
+      '-L',
+      '--fail',
+      '--silent',
+      '--show-error',
+      '--max-time',
+      '25',
+      '-H',
+      'Accept: application/json',
+      url,
+    ], { maxBuffer: 20 * 1024 * 1024 }, (err, stdout, stderr) => {
+      if (err) {
+        err.message = [err.message, stderr && stderr.trim()].filter(Boolean).join(' | ');
+        reject(err);
+        return;
+      }
+      try {
+        resolve(JSON.parse(stdout));
+      } catch (parseErr) {
+        reject(new Error('JSON inválido: ' + parseErr.message));
+      }
+    });
+  });
+}
+
+async function buscarPagina(ano, page, tipoId = null) {
+  const path = `/materia/materialegislativa/?ano=${ano}&page=${page}&page_size=100${tipoId ? `&tipo=${tipoId}` : ''}`;
+  for (const source of API_SOURCES) {
+    const url = source.apiBase + path;
+    try {
+      const json = source.insecureTls ? await fetchJsonInsecure(url) : await fetchJson(url);
+      if (Array.isArray(json.results)) {
+        json.results = json.results.map(item => ({ ...item, __siteBase: source.siteBase, __sourceLabel: source.label }));
+      }
+      if (source.label !== API_SOURCES[0].label) {
+        console.warn(`⚠️ API principal indisponível; usando fallback ${source.label} na página ${page}${tipoId ? `, tipo ${tipoId}` : ''}.`);
+      }
+      return json;
+    } catch (err) {
+      console.warn(`⚠️ Falha na API ${source.label} (página ${page}${tipoId ? `, tipo ${tipoId}` : ''}): ${err.message}`);
+    }
+  }
+  console.error(`❌ Erro na API (página ${page}${tipoId ? `, tipo ${tipoId}` : ''}): todas as fontes falharam`);
+  return null;
 }
 
 async function buscarUltimasPaginas(ano, tipoId = null, sigla = 'geral') {
@@ -680,7 +739,7 @@ function normalizarProposicao(p) {
     autor,
     data: p.data_apresentacao || '-',
     ementa: (p.ementa || '-'),
-    link: `${SITE_BASE}/materia/${p.id}`,
+    link: `${p.__siteBase || SITE_BASE}/materia/${p.id}`,
   };
   normalizada.abraselPb = classificarAbraselPb(normalizada);
   return normalizada;
